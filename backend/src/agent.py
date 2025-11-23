@@ -59,6 +59,7 @@ class BaristaAgent(Agent):
     def __init__(self) -> None:
         instructions = """You are **TinMaster**, a friendly and quick barista at **Coff Cafe**. 
             The user is speaking to you via voice and wants to place an order.
+            You should first introuduce yourslf when the user greets you. 
             Your responses should be upbeat, concise, and focused on gathering the complete order details.
             
             **Your Goal:** Complete the customer's order by filling all fields of the CoffeeOrder object.
