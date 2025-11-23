@@ -1,4 +1,7 @@
+import json
 import logging
+import os
+import sys
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -12,42 +15,88 @@ from livekit.agents import (
     cli,
     metrics,
     tokenize,
-    # function_tool,
-    # RunContext
+    function_tool,
+    RunContext
 )
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from typing import Annotated, Literal, List
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-
-class Assistant(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions="""You are a helpful voice AI assistant. The user is interacting with you via voice, even if you perceive the conversation as text.
-            You eagerly assist users with their questions by providing information from your extensive knowledge.
-            Your responses are concise, to the point, and without any complex formatting or punctuation including emojis, asterisks, or other symbols.
-            You are curious, friendly, and have a sense of humor.""",
+# --- Coffee Order State ---
+class CoffeeOrder(BaseModel):
+    """The current state of the coffee order."""
+    drinkType: Annotated[
+        str,
+        Field(
+            description="The type of coffee drink, e.g., 'Latte', 'Cappuccino', 'Americano'. MUST be one of the suggested types or a generic 'Coffee'.",
+            json_schema_extra={"enum": ["Latte", "Cappuccino", "Americano", "Espresso", "Mocha", "Drip Coffee", "Tea"]}
         )
+    ]
+    size: Annotated[
+        Literal["Small", "Medium", "Large"],
+        Field(description="The requested size of the drink.")
+    ]
+    milk: Annotated[
+        Literal["Whole", "Skim", "Oat", "Almond"],
+        Field(description="The type of milk for the drink.")
+    ]
+    extras: Annotated[
+        List[str],
+        Field(description="Any extra additions, e.g., 'Extra shot', 'Vanilla syrup', 'Whipped cream'.")
+    ] = []
+    name: Annotated[
+        str,
+        Field(description="The customer's first name, for the order.")
+    ]
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+# --- Agent Definition ---
+class BaristaAgent(Agent):
+    def __init__(self) -> None:
+        instructions = """You are **TinMaster**, a friendly and quick barista at **Coff Cafe**. 
+            The user is speaking to you via voice and wants to place an order.
+            Your responses should be upbeat, concise, and focused on gathering the complete order details.
+            
+            **Your Goal:** Complete the customer's order by filling all fields of the CoffeeOrder object.
+            
+            1.  **Ask for Missing Details:** If any field in the CoffeeOrder is missing (drinkType, size, milk, or name), you **must** ask a clarifying question for that specific field. For example: "What size would you like that?" or "And what's your name for the order?"
+            2.  **Confirm Extras:** If the user mentions any extras (like 'extra shot', 'vanilla syrup', 'whip'), add them to the 'extras' list.
+            3.  **Finalize Order:** Once all fields are filled, you **MUST** call the `save_order_to_file` tool to complete the transaction and give a friendly closing line.
+            4.  **Stay in Character:** Use light, friendly language appropriate for a coffee shop. Avoid technical jargon or complex formatting.
+        """
+        super().__init__(
+            instructions=instructions,
+            tools=[]
+        )
+        self.order_id_counter = 0
+
+    @function_tool
+    async def save_order_to_file(self, ctx: RunContext, order: CoffeeOrder) -> str:
+        """
+        Call this tool **ONLY** when the entire CoffeeOrder object is fully specified (drinkType, size, milk, and name are all filled). 
+        This finalizes the order and generates the receipt.
+        """
+        self.order_id_counter += 1
+        
+        # Create a simple JSON file for the order summary
+        order_summary = {
+            "order_number": f"CC-{self.order_id_counter:03d}",
+            "customer_name": order.name,
+            "drink": f"{order.size} {order.drinkType} with {order.milk} milk",
+            "extras": order.extras if order.extras else "None",
+            "status": "Complete"
+        }
+        
+        # In a real application, you'd save this to a database. Here we just log and return.
+        file_name = f"order_{order_summary['order_number']}.json"
+        with open(file_name, 'w') as f:
+            json.dump(order_summary, f, indent=2)
+
+        return f"Order {order_summary['order_number']} for {order.name} has been placed. Details saved to {file_name}. Order JSON: {json.dumps(order_summary)}"
 
 
 def prewarm(proc: JobProcess):
@@ -56,50 +105,26 @@ def prewarm(proc: JobProcess):
 
 async def entrypoint(ctx: JobContext):
     # Logging setup
-    # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using OpenAI, Cartesia, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
         stt=deepgram.STT(model="nova-3"),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
         llm=google.LLM(
                 model="gemini-2.5-flash",
             ),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
                 voice="en-US-matthew", 
                 style="Conversation",
                 tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
                 text_pacing=True
             ),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
     )
 
-    # To use a realtime model instead of a voice pipeline, use the following session setup instead.
-    # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/))
-    # 1. Install livekit-agents[openai]
-    # 2. Set OPENAI_API_KEY in .env.local
-    # 3. Add `from livekit.plugins import openai` to the top of this file
-    # 4. Use the following session setup instead of the version above
-    # session = AgentSession(
-    #     llm=openai.realtime.RealtimeModel(voice="marin")
-    # )
-
-    # Metrics collection, to measure pipeline performance
-    # For more information, see https://docs.livekit.io/agents/build/metrics/
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -113,25 +138,15 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = hedra.AvatarSession(
-    #   avatar_id="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/hedra
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
-
-    # Start the session, which initializes the voice pipeline and warms up the models
+    # Start the session with the BaristaAgent
     await session.start(
-        agent=Assistant(),
+        agent=BaristaAgent(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            # For telephony applications, use `BVCTelephony` for best results
             noise_cancellation=noise_cancellation.BVC(),
         ),
     )
 
-    # Join the room and connect to the user
     await ctx.connect()
 
 
