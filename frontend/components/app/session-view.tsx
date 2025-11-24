@@ -120,6 +120,15 @@ export const SessionView = ({
         {appConfig.isPreConnectBufferEnabled && (
           <PreConnectMessage messages={messages} className="pb-4" />
         )}
+        <div className="absolute bottom-40 left-0 right-0 z-50 flex justify-center pointer-events-none">
+        {/* Increased padding (py-2) and font size (text-sm) here */}
+        <div className="bg-amber-100/90 dark:bg-amber-900/80 border border-amber-200/50 dark:border-amber-700/50 backdrop-blur-md px-5 py-2 rounded-full shadow-sm">
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-100 flex items-center gap-1.5">
+            <span>⚠️</span>
+            <span>Strictly Non-Medical • Wellness Support Only</span>
+          </p>
+        </div>
+      </div>
         <div className="bg-background relative mx-auto max-w-2xl pb-3 md:pb-12">
           <Fade bottom className="absolute inset-x-0 top-0 h-4 -translate-y-full" />
           <AgentControlBar controls={controls} onChatOpenChange={setChatOpen} />
