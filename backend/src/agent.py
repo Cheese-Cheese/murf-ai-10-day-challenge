@@ -2,12 +2,10 @@ import logging
 import json
 import os
 import asyncio
-from datetime import datetime
-from typing import Annotated, Literal, List, Optional
-from dataclasses import dataclass, field, asdict
+from typing import Annotated, Literal, Optional
+from dataclasses import dataclass
 from dotenv import load_dotenv
 from pydantic import Field
-
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -16,200 +14,200 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
-    metrics,
-    MetricsCollectedEvent,
-    RunContext,
     function_tool,
+    RunContext,
 )
 
+# 🔌 PLUGINS
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-logger = logging.getLogger("wellness-agent")
+logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 # ======================================================
-# 🧠 DATA MODELS & STATE
+# 📚 KNOWLEDGE BASE (PHYSICS DATA)
 # ======================================================
 
-@dataclass
-class CheckInEntry:
-    """📝 Schema for a single daily check-in"""
-    date: str = field(default_factory=lambda: datetime.now().isoformat())
-    mood: str | None = None
-    energy_level: str | None = None
-    stressors: str | None = None
-    objectives: List[str] = field(default_factory=list)
-    self_care: str | None = None
-    
-    def is_complete(self) -> bool:
-        """Check if we have enough info to wrap up"""
-        # We need at least a mood and one objective
-        return self.mood is not None and len(self.objectives) > 0
+# 🆕 Renamed file for Physics content
+CONTENT_FILE = "physics_content.json" 
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+# ⚛️ NEW PHYSICS QUESTIONS
+DEFAULT_CONTENT = [
+  {
+    "id": "newton_laws",
+    "title": "Newton's Laws of Motion",
+    "summary": "Sir Isaac Newton's three laws of motion describe the relationship between the motion of an object and the forces acting on it. The first law is inertia, the second is F=ma, and the third states that for every action, there is an equal and opposite reaction.",
+    "sample_question": "Explain Newton's Third Law of Motion and give a real-world example."
+  },
+  {
+    "id": "energy",
+    "title": "Energy",
+    "summary": "Energy is the quantitative property that must be transferred to a body or physical system to perform work on the body, or to heat it. Common forms include Kinetic Energy (motion) and Potential Energy (position). Energy cannot be created or destroyed, only transformed.",
+    "sample_question": "What is the difference between Kinetic Energy and Potential Energy?"
+  },
+  {
+    "id": "gravity",
+    "title": "Gravity",
+    "summary": "Gravity is a fundamental interaction which causes mutual attraction between all things with mass or energy. On Earth, gravity gives weight to physical objects, and the Moon's gravity causes the ocean tides.",
+    "sample_question": "How does mass affect the gravitational force between two objects according to Newton's law of universal gravitation?"
+  },
+  {
+    "id": "thermodynamics",
+    "title": "Thermodynamics",
+    "summary": "Thermodynamics is the branch of physics that deals with heat, work, and temperature, and their relation to energy, entropy, and the physical properties of matter and radiation.",
+    "sample_question": "What does the Second Law of Thermodynamics say about entropy in an isolated system?"
+  }
+]
 
-@dataclass
-class UserSessionData:
-    """👤 Session state wrapper"""
-    current_entry: CheckInEntry
-    history_summary: str = ""  # Context from previous sessions
-
-# ======================================================
-# 💾 PERSISTENCE LAYER (Single JSON File)
-# ======================================================
-
-DB_FILE = "wellness_log.json"
-
-def get_db_path():
-    base_dir = os.path.dirname(__file__)
-    return os.path.join(base_dir, DB_FILE)
-
-def load_history_context() -> str:
-    """📖 Reads the JSON log and returns a summary of the LAST check-in."""
-    path = get_db_path()
-    if not os.path.exists(path):
-        return "This is the user's first session. Welcome them warmly."
-
+def load_content():
+    """
+    📖 Checks if physics JSON exists. 
+    If NO: Generates it from DEFAULT_CONTENT.
+    If YES: Loads it.
+    """
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-        if not data or not isinstance(data, list):
-            return "No valid past history found."
-
-        last_entry = data[-1]
+        path = os.path.join(os.path.dirname(__file__), CONTENT_FILE)
         
-        # Parse date for friendly display
-        try:
-            date_obj = datetime.fromisoformat(last_entry.get('date', ''))
-            date_str = date_obj.strftime("%A, %B %d")
-        except:
-            date_str = "the last session"
-
-        summary = (
-            f"CONTEXT FROM PREVIOUS SESSION ({date_str}):\n"
-            f"- Mood: {last_entry.get('mood', 'unknown')}\n"
-            f"- Energy: {last_entry.get('energy_level', 'unknown')}\n"
-            f"- Their Goals were: {', '.join(last_entry.get('objectives', []))}\n"
-            f"INSTRUCTION: Reference this briefly. E.g., 'Last time you were feeling...'"
-        )
-        return summary
+        # Check if file exists
+        if not os.path.exists(path):
+            print(f"⚠️ {CONTENT_FILE} not found. Generating physics data...")
+            with open(path, "w", encoding='utf-8') as f:
+                json.dump(DEFAULT_CONTENT, f, indent=4)
+            print("✅ Physics content file created successfully.")
+            
+        # Read the file
+        with open(path, "r", encoding='utf-8') as f:
+            data = json.load(f)
+            return data
+            
     except Exception as e:
-        logger.error(f"Error reading history: {e}")
-        return "Error loading history. Proceed as a fresh session."
+        print(f"⚠️ Error managing content file: {e}")
+        return []
 
-def append_entry_to_log(entry: CheckInEntry):
-    """💾 Appends the new entry to the JSON list."""
-    path = get_db_path()
-    data = []
-
-    # Read existing
-    if os.path.exists(path):
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                if content.strip():
-                    data = json.loads(content)
-        except Exception as e:
-            logger.error(f"Corrupt DB, starting fresh: {e}")
-
-    # Append new
-    data.append(entry.to_dict())
-
-    # Write back
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    
-    print(f"✅ Saved check-in to {path}")
+# Load data immediately on startup
+COURSE_CONTENT = load_content()
 
 # ======================================================
-# 🛠️ AGENT TOOLS
+# 🧠 STATE MANAGEMENT
+# ======================================================
+
+@dataclass
+class TutorState:
+    """🧠 Tracks the current learning context"""
+    current_topic_id: str | None = None
+    current_topic_data: dict | None = None
+    mode: Literal["learn", "quiz", "teach_back"] = "learn"
+    
+    def set_topic(self, topic_id: str):
+        # Find topic in loaded content
+        topic = next((item for item in COURSE_CONTENT if item["id"] == topic_id), None)
+        if topic:
+            self.current_topic_id = topic_id
+            self.current_topic_data = topic
+            return True
+        return False
+
+@dataclass
+class Userdata:
+    tutor_state: TutorState
+    agent_session: Optional[AgentSession] = None 
+
+# ======================================================
+# 🛠️ TUTOR TOOLS
 # ======================================================
 
 @function_tool
-async def log_mood_status(
-    ctx: RunContext[UserSessionData],
-    mood: Annotated[str, Field(description="The user's reported emotional state (e.g., happy, anxious, calm).")],
-    energy: Annotated[str, Field(description="Energy level (e.g., high, low, exhausted, energetic).")],
-    stressors: Annotated[str, Field(description="Any specific things stressing them out, or 'None'.")] = "None"
+async def select_topic(
+    ctx: RunContext[Userdata], 
+    topic_id: Annotated[str, Field(description="The ID of the topic to study (e.g., 'newton_laws', 'energy', 'gravity')")]
 ) -> str:
-    """📝 Log the user's mood and energy. Call this when they describe how they feel."""
-    ctx.userdata.current_entry.mood = mood
-    ctx.userdata.current_entry.energy_level = energy
-    ctx.userdata.current_entry.stressors = stressors
+    """📚 Selects a physics topic to study from the available list."""
+    state = ctx.userdata.tutor_state
+    success = state.set_topic(topic_id.lower())
     
-    print(f"🧠 MOOD LOGGED: {mood} | Energy: {energy}")
-    
-    return f"Logged: Mood is {mood}, energy is {energy}. Now ask about their intentions for the day."
+    if success:
+        return f"Topic set to {state.current_topic_data['title']}. Ask the user if they want to 'Learn', be 'Quizzed', or 'Teach it back'."
+    else:
+        available = ", ".join([t["id"] for t in COURSE_CONTENT])
+        return f"Topic not found. Available topics are: {available}"
 
 @function_tool
-async def log_daily_intentions(
-    ctx: RunContext[UserSessionData],
-    objectives: Annotated[List[str], Field(description="List of 1-3 practical goals for the day.")],
-    self_care: Annotated[str, Field(description="Any specific self-care or rest activity planned.")] = "None"
+async def set_learning_mode(
+    ctx: RunContext[Userdata], 
+    mode: Annotated[str, Field(description="The mode to switch to: 'learn', 'quiz', or 'teach_back'")]
 ) -> str:
-    """🎯 Log the user's goals/intentions. Call this when they state what they want to do."""
-    ctx.userdata.current_entry.objectives = objectives
-    ctx.userdata.current_entry.self_care = self_care
+    """🔄 Switches the interaction mode and updates the agent's voice/persona."""
     
-    print(f"🎯 GOALS LOGGED: {objectives}")
+    # 1. Update State
+    state = ctx.userdata.tutor_state
+    state.mode = mode.lower()
     
-    return "Goals logged. Now, offer a brief, grounded reflection or simple advice based on their mood and goals."
+    # 2. Switch Voice based on Mode
+    agent_session = ctx.userdata.agent_session 
+    
+    if agent_session:
+        if state.mode == "learn":
+            # 👨‍🏫 MATTHEW: The Lecturer
+            agent_session.tts.update_options(voice="en-US-matthew", style="Promo")
+            instruction = f"Mode: LEARN. Explain this physics concept: {state.current_topic_data['summary']}"
+            
+        elif state.mode == "quiz":
+            # 👩‍🏫 ALICIA: The Examiner
+            agent_session.tts.update_options(voice="en-US-alicia", style="Conversational")
+            instruction = f"Mode: QUIZ. Ask this physics question: {state.current_topic_data['sample_question']}"
+            
+        elif state.mode == "teach_back":
+            # 👨‍🎓 KEN: The Student/Coach
+            agent_session.tts.update_options(voice="en-US-ken", style="Promo")
+            instruction = "Mode: TEACH_BACK. Ask the user to explain the physics concept to you as if YOU are the beginner."
+        else:
+            return "Invalid mode."
+    else:
+        instruction = "Voice switch failed (Session not found)."
+
+    print(f"🔄 SWITCHING MODE -> {state.mode.upper()}")
+    return f"Switched to {state.mode} mode. {instruction}"
 
 @function_tool
-async def finalize_checkin(ctx: RunContext[UserSessionData]) -> str:
-    """💾 Finalize the session. Call this AFTER doing the recap and confirming with the user."""
-    entry = ctx.userdata.current_entry
-    
-    if not entry.is_complete():
-        return "Cannot finalize yet. Please ask for their mood and at least one objective for the day."
-
-    try:
-        append_entry_to_log(entry)
-        return "Session saved successfully. You can now say goodbye."
-    except Exception as e:
-        return f"Error saving session: {e}"
+async def evaluate_teaching(
+    ctx: RunContext[Userdata],
+    user_explanation: Annotated[str, Field(description="The explanation given by the user during teach-back")]
+) -> str:
+    """📝 call this when the user has finished explaining a concept in 'teach_back' mode."""
+    print(f"📝 EVALUATING EXPLANATION: {user_explanation}")
+    return "Analyze the user's explanation of the physics concept. Give them a score out of 10 on accuracy and clarity, and correct any misconceptions."
 
 # ======================================================
-# 🤖 COMPANION AGENT
+# 🧠 AGENT DEFINITION
 # ======================================================
 
-class WellnessCompanion(Agent):
-    def __init__(self, history_context: str):
+class TutorAgent(Agent):
+    def __init__(self):
+        # Generate list of topics for the prompt
+        topic_list = ", ".join([f"{t['id']} ({t['title']})" for t in COURSE_CONTENT])
+        
         super().__init__(
             instructions=f"""
-            You are a supportive, grounded Voice Wellness Companion.
+            You are a Physics Tutor designed to help users master concepts like Newton's Laws and Energy.
             
-            OBJECTIVE:
-            Conduct a 2-3 minute daily check-in to track mood and set intentions.
+            📚 **AVAILABLE TOPICS:** {topic_list}
             
-            CORE BEHAVIORS:
-            1. **Grounded & Warm**: Be kind but practical. Avoid toxic positivity.
-            2. **Non-Medical**: NEVER offer medical diagnoses or clinical advice. If the user mentions serious symptoms, suggest they see a professional.
-            3. **Brief**: Keep responses short (1-2 sentences) unless explaining an idea.
+            🔄 **YOU HAVE 3 MODES:**
+            1. **LEARN Mode (Voice: Matthew):** You explain the concept clearly using the summary data.
+            2. **QUIZ Mode (Voice: Alicia):** You ask the user a specific question to test knowledge.
+            3. **TEACH_BACK Mode (Voice: Ken):** YOU pretend to be a student. Ask the user to explain the concept to you.
             
-            SESSION FLOW:
-            1. **Connect**: Greet them. {history_context}
-            2. **Mood Check**: Ask "How are you feeling today?" and "How is your energy?".
-            3. **Intentions**: Ask "What are 1-3 things you want to focus on today?" or "Any self-care planned?".
-            4. **Reflect**: Offer ONE piece of simple, non-medical advice (e.g., "Since you're tired, maybe break that big goal into 20-minute chunks").
-            5. **Recap & Close**: Summarize what they said (Mood + Goals) and ask "Does that sound right?".
-            6. **Finalize**: Once they confirm, call the `finalize_checkin` tool.
-
-            TONE:
-            Calm, steady, encouraging.
+            ⚙️ **BEHAVIOR:**
+            - Start by asking what physics topic they want to study.
+            - Use the `set_learning_mode` tool immediately when the user asks to learn, take a quiz, or teach.
+            - In 'teach_back' mode, listen to their explanation and then use `evaluate_teaching` to give feedback.
             """,
-            tools=[
-                log_mood_status,
-                log_daily_intentions,
-                finalize_checkin
-            ],
+            tools=[select_topic, set_learning_mode, evaluate_teaching],
         )
 
 # ======================================================
-# 🚀 MAIN ENTRYPOINT
+# 🎬 ENTRYPOINT
 # ======================================================
 
 def prewarm(proc: JobProcess):
@@ -218,38 +216,33 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    # 1. Load History
-    history_summary = load_history_context()
-    print(f"\n📜 LOADED HISTORY:\n{history_summary}\n")
+    print("\n" + "⚛️" * 25)
+    print("🚀 STARTING PHYSICS TUTOR SESSION")
+    print(f"📚 Loaded {len(COURSE_CONTENT)} topics from Knowledge Base")
+    
+    # 1. Initialize State
+    userdata = Userdata(tutor_state=TutorState())
 
-    # 2. Init Session State
-    initial_state = UserSessionData(
-        current_entry=CheckInEntry(),
-        history_summary=history_summary
-    )
-
-    # 3. Setup Agent Session
+    # 2. Setup Agent
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
-            voice="en-US-matthew", # Calm, conversational voice
-            style="Conversation",
+            voice="en-US-matthew", 
+            style="Promo",        
             text_pacing=True,
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        userdata=initial_state,
+        userdata=userdata,
     )
-
-    usage_collector = metrics.UsageCollector()
-    @session.on("metrics_collected")
-    def _on_metrics(ev: MetricsCollectedEvent):
-        usage_collector.collect(ev.metrics)
-
-    # 4. Start Agent with Dynamic History Context
+    
+    # 3. Store session in userdata for tools to access
+    userdata.agent_session = session
+    
+    # 4. Start
     await session.start(
-        agent=WellnessCompanion(history_context=history_summary),
+        agent=TutorAgent(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC()
