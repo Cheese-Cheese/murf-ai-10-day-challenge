@@ -2,8 +2,8 @@ import logging
 import json
 import os
 import asyncio
-from typing import Annotated, Literal, Optional
-from dataclasses import dataclass
+from typing import Annotated, Literal, Optional, Dict, List
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from pydantic import Field
 from livekit.agents import (
@@ -29,10 +29,8 @@ load_dotenv(".env.local")
 # 📚 KNOWLEDGE BASE (PHYSICS DATA)
 # ======================================================
 
-# 🆕 Renamed file for Physics content
 CONTENT_FILE = "physics_content.json" 
 
-# ⚛️ NEW PHYSICS QUESTIONS
 DEFAULT_CONTENT = [
   {
     "id": "newton_laws",
@@ -61,52 +59,62 @@ DEFAULT_CONTENT = [
 ]
 
 def load_content():
-    """
-    📖 Checks if physics JSON exists. 
-    If NO: Generates it from DEFAULT_CONTENT.
-    If YES: Loads it.
-    """
     try:
         path = os.path.join(os.path.dirname(__file__), CONTENT_FILE)
-        
-        # Check if file exists
         if not os.path.exists(path):
-            print(f"⚠️ {CONTENT_FILE} not found. Generating physics data...")
             with open(path, "w", encoding='utf-8') as f:
                 json.dump(DEFAULT_CONTENT, f, indent=4)
-            print("✅ Physics content file created successfully.")
-            
-        # Read the file
         with open(path, "r", encoding='utf-8') as f:
             data = json.load(f)
             return data
-            
     except Exception as e:
-        print(f"⚠️ Error managing content file: {e}")
+        logger.error(f"Error loading content: {e}")
         return []
 
-# Load data immediately on startup
 COURSE_CONTENT = load_content()
 
 # ======================================================
-# 🧠 STATE MANAGEMENT
+# 🧠 STATE MANAGEMENT (With Richer Mastery)
 # ======================================================
 
 @dataclass
+class TopicMastery:
+    times_explained: int = 0
+    times_quizzed: int = 0
+    times_taught_back: int = 0
+    last_score: int = 0
+    avg_score: float = 0.0
+    _score_history: List[int] = field(default_factory=list)
+
+    def add_score(self, score: int):
+        self.last_score = score
+        self.times_taught_back += 1
+        self._score_history.append(score)
+        self.avg_score = sum(self._score_history) / len(self._score_history)
+
+@dataclass
 class TutorState:
-    """🧠 Tracks the current learning context"""
+    """🧠 Tracks the current learning context and mastery scores"""
     current_topic_id: str | None = None
     current_topic_data: dict | None = None
     mode: Literal["learn", "quiz", "teach_back"] = "learn"
+    mastery: Dict[str, TopicMastery] = field(default_factory=dict)
     
     def set_topic(self, topic_id: str):
-        # Find topic in loaded content
         topic = next((item for item in COURSE_CONTENT if item["id"] == topic_id), None)
         if topic:
             self.current_topic_id = topic_id
             self.current_topic_data = topic
+            # Initialize mastery entry if not exists
+            if topic_id not in self.mastery:
+                self.mastery[topic_id] = TopicMastery()
             return True
         return False
+        
+    def get_mastery(self, topic_id: str) -> TopicMastery:
+        if topic_id not in self.mastery:
+            self.mastery[topic_id] = TopicMastery()
+        return self.mastery[topic_id]
 
 @dataclass
 class Userdata:
@@ -120,14 +128,16 @@ class Userdata:
 @function_tool
 async def select_topic(
     ctx: RunContext[Userdata], 
-    topic_id: Annotated[str, Field(description="The ID of the topic to study (e.g., 'newton_laws', 'energy', 'gravity')")]
+    topic_id: Annotated[str, Field(description="The ID of the topic to study")]
 ) -> str:
     """📚 Selects a physics topic to study from the available list."""
     state = ctx.userdata.tutor_state
     success = state.set_topic(topic_id.lower())
     
     if success:
-        return f"Topic set to {state.current_topic_data['title']}. Ask the user if they want to 'Learn', be 'Quizzed', or 'Teach it back'."
+        m = state.get_mastery(topic_id)
+        stats = f"(Mastery: {m.avg_score:.1f}% | Taught back: {m.times_taught_back} times)"
+        return f"Topic set to {state.current_topic_data['title']} {stats}. Ask the user if they want to 'Learn', be 'Quizzed', or 'Teach it back'."
     else:
         available = ", ".join([t["id"] for t in COURSE_CONTENT])
         return f"Topic not found. Available topics are: {available}"
@@ -137,46 +147,63 @@ async def set_learning_mode(
     ctx: RunContext[Userdata], 
     mode: Annotated[str, Field(description="The mode to switch to: 'learn', 'quiz', or 'teach_back'")]
 ) -> str:
-    """🔄 Switches the interaction mode and updates the agent's voice/persona."""
-    
-    # 1. Update State
+    """🔄 Switches the interaction mode, updates voice, and increments usage counters."""
     state = ctx.userdata.tutor_state
-    state.mode = mode.lower()
     
-    # 2. Switch Voice based on Mode
+    if not state.current_topic_id:
+        return "Please select a topic first using select_topic."
+
+    state.mode = mode.lower()
+    mastery = state.get_mastery(state.current_topic_id)
+    
     agent_session = ctx.userdata.agent_session 
     
     if agent_session:
         if state.mode == "learn":
-            # 👨‍🏫 MATTHEW: The Lecturer
+            mastery.times_explained += 1
             agent_session.tts.update_options(voice="en-US-matthew", style="Promo")
-            instruction = f"Mode: LEARN. Explain this physics concept: {state.current_topic_data['summary']}"
+            instruction = f"Mode: LEARN. Explain this: {state.current_topic_data['summary']}"
             
         elif state.mode == "quiz":
-            # 👩‍🏫 ALICIA: The Examiner
+            mastery.times_quizzed += 1
             agent_session.tts.update_options(voice="en-US-alicia", style="Conversational")
-            instruction = f"Mode: QUIZ. Ask this physics question: {state.current_topic_data['sample_question']}"
+            instruction = f"Mode: QUIZ. Ask this: {state.current_topic_data['sample_question']}"
             
         elif state.mode == "teach_back":
-            # 👨‍🎓 KEN: The Student/Coach
+            # Don't increment count yet, wait for evaluation
             agent_session.tts.update_options(voice="en-US-ken", style="Promo")
-            instruction = "Mode: TEACH_BACK. Ask the user to explain the physics concept to you as if YOU are the beginner."
+            instruction = "Mode: TEACH_BACK. Ask the user to explain the concept to you."
         else:
             return "Invalid mode."
     else:
-        instruction = "Voice switch failed (Session not found)."
+        instruction = "Voice switch failed."
 
-    print(f"🔄 SWITCHING MODE -> {state.mode.upper()}")
+    print(f"🔄 MODE -> {state.mode.upper()} | Stats for {state.current_topic_id}: {mastery}")
     return f"Switched to {state.mode} mode. {instruction}"
 
 @function_tool
 async def evaluate_teaching(
     ctx: RunContext[Userdata],
-    user_explanation: Annotated[str, Field(description="The explanation given by the user during teach-back")]
+    user_explanation: Annotated[str, Field(description="The explanation given by the user")],
+    score: Annotated[int, Field(description="A score between 0-100 based on accuracy and clarity")]
 ) -> str:
-    """📝 call this when the user has finished explaining a concept in 'teach_back' mode."""
-    print(f"📝 EVALUATING EXPLANATION: {user_explanation}")
-    return "Analyze the user's explanation of the physics concept. Give them a score out of 10 on accuracy and clarity, and correct any misconceptions."
+    """📝 Records the teach-back score and returns feedback instructions."""
+    state = ctx.userdata.tutor_state
+    
+    if not state.current_topic_id:
+        return "No topic selected."
+
+    # Update Mastery
+    mastery = state.get_mastery(state.current_topic_id)
+    mastery.add_score(score)
+    
+    print(f"📝 EVALUATION: Score {score}/100 | Avg {mastery.avg_score:.1f} | Explanation: {user_explanation[:50]}...")
+    
+    return (
+        f"User Score: {score}/100. Running Average: {mastery.avg_score:.1f}. "
+        f"Give specific feedback on their explanation. "
+        f"If score < 70, correct their mistakes gently. If > 90, praise their mastery."
+    )
 
 # ======================================================
 # 🧠 AGENT DEFINITION
@@ -184,24 +211,23 @@ async def evaluate_teaching(
 
 class TutorAgent(Agent):
     def __init__(self):
-        # Generate list of topics for the prompt
         topic_list = ", ".join([f"{t['id']} ({t['title']})" for t in COURSE_CONTENT])
         
         super().__init__(
             instructions=f"""
-            You are a Physics Tutor designed to help users master concepts like Newton's Laws and Energy.
+            You are a Physics Tutor helping users master concepts like Newton's Laws.
             
             📚 **AVAILABLE TOPICS:** {topic_list}
             
-            🔄 **YOU HAVE 3 MODES:**
-            1. **LEARN Mode (Voice: Matthew):** You explain the concept clearly using the summary data.
-            2. **QUIZ Mode (Voice: Alicia):** You ask the user a specific question to test knowledge.
-            3. **TEACH_BACK Mode (Voice: Ken):** YOU pretend to be a student. Ask the user to explain the concept to you.
+            🔄 **MODES:**
+            1. **LEARN (Matthew):** Explain the concept.
+            2. **QUIZ (Alicia):** Ask a question.
+            3. **TEACH_BACK (Ken):** Listen to the user's explanation.
             
-            ⚙️ **BEHAVIOR:**
-            - Start by asking what physics topic they want to study.
-            - Use the `set_learning_mode` tool immediately when the user asks to learn, take a quiz, or teach.
-            - In 'teach_back' mode, listen to their explanation and then use `evaluate_teaching` to give feedback.
+            ⚙️ **RULES:**
+            - **Always** select a topic first.
+            - **Always** use `set_learning_mode` to switch tasks.
+            - **In Teach-Back Mode:** Listen to the user, **decide on a score (0-100)** based on their accuracy, and call `evaluate_teaching` with that score.
             """,
             tools=[select_topic, set_learning_mode, evaluate_teaching],
         )
@@ -217,36 +243,25 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
     print("\n" + "⚛️" * 25)
-    print("🚀 STARTING PHYSICS TUTOR SESSION")
-    print(f"📚 Loaded {len(COURSE_CONTENT)} topics from Knowledge Base")
+    print("🚀 STARTING PHYSICS TUTOR SESSION (WITH MASTERY TRACKING)")
     
-    # 1. Initialize State
     userdata = Userdata(tutor_state=TutorState())
 
-    # 2. Setup Agent
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(
-            voice="en-US-matthew", 
-            style="Promo",        
-            text_pacing=True,
-        ),
+        tts=murf.TTS(voice="en-US-matthew", style="Promo", text_pacing=True),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         userdata=userdata,
     )
     
-    # 3. Store session in userdata for tools to access
     userdata.agent_session = session
     
-    # 4. Start
     await session.start(
         agent=TutorAgent(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        ),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
     await ctx.connect()
