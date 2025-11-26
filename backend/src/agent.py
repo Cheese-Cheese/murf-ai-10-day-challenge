@@ -2,8 +2,10 @@ import logging
 import json
 import os
 import asyncio
-from typing import Annotated, Literal, Optional, Dict, List
-from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Annotated, Literal, Optional, List
+from dataclasses import dataclass, asdict
+
 from dotenv import load_dotenv
 from pydantic import Field
 from livekit.agents import (
@@ -26,210 +28,197 @@ logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 # ======================================================
-# 📚 KNOWLEDGE BASE (PHYSICS DATA)
+# 📂 1. KNOWLEDGE BASE (FAQ) - LENSKART THEMED
 # ======================================================
 
-CONTENT_FILE = "physics_content.json" 
+FAQ_FILE = "lenskart_faq.json"
+LEADS_FILE = "lenskart_leads.json"
+EMAILS_FILE = "email_drafts.json"
 
-DEFAULT_CONTENT = [
-  {
-    "id": "newton_laws",
-    "title": "Newton's Laws of Motion",
-    "summary": "Sir Isaac Newton's three laws of motion describe the relationship between the motion of an object and the forces acting on it. The first law is inertia, the second is F=ma, and the third states that for every action, there is an equal and opposite reaction.",
-    "sample_question": "Explain Newton's Third Law of Motion and give a real-world example."
-  },
-  {
-    "id": "energy",
-    "title": "Energy",
-    "summary": "Energy is the quantitative property that must be transferred to a body or physical system to perform work on the body, or to heat it. Common forms include Kinetic Energy (motion) and Potential Energy (position). Energy cannot be created or destroyed, only transformed.",
-    "sample_question": "What is the difference between Kinetic Energy and Potential Energy?"
-  },
-  {
-    "id": "gravity",
-    "title": "Gravity",
-    "summary": "Gravity is a fundamental interaction which causes mutual attraction between all things with mass or energy. On Earth, gravity gives weight to physical objects, and the Moon's gravity causes the ocean tides.",
-    "sample_question": "How does mass affect the gravitational force between two objects according to Newton's law of universal gravitation?"
-  },
-  {
-    "id": "thermodynamics",
-    "title": "Thermodynamics",
-    "summary": "Thermodynamics is the branch of physics that deals with heat, work, and temperature, and their relation to energy, entropy, and the physical properties of matter and radiation.",
-    "sample_question": "What does the Second Law of Thermodynamics say about entropy in an isolated system?"
-  }
+# Default FAQ data for "Lenskart"
+DEFAULT_FAQ = [
+    {
+        "question": "What products do you sell?",
+        "answer": "We offer a wide range of eyewear including premium eyeglasses, computer glasses (Blu-cut), polarized sunglasses, and contact lenses. We feature brands like Vincent Chase, John Jacobs, and Lenskart Air."
+    },
+    {
+        "question": "Do you offer home eye check-ups?",
+        "answer": "Yes! We offer a 'Home Eye Check-up' service. A certified optometrist will visit your home with specialized equipment and 100 best-selling frames for you to try. It costs just ₹99."
+    },
+    {
+        "question": "What is the Gold Membership?",
+        "answer": "Lenskart Gold Membership gives you access to our exclusive 'Buy 1 Get 1 Free' offer on all eyeglasses and sunglasses. It applies to the entire family and is valid for a year."
+    },
+    {
+        "question": "What is your return policy?",
+        "answer": "We have a '14-Day No Questions Asked' return policy. If you don't like the fit or style, you can return or exchange them easily."
+    },
+    {
+        "question": "How much do glasses cost?",
+        "answer": "Our eyeglasses start from as low as ₹1199 including lenses. The final price depends on the frame brand and the lens package you choose (e.g., Anti-glare, Blu-cut, Progressive)."
+    }
 ]
 
-def load_content():
+def load_knowledge_base():
+    """Generates FAQ file if missing, then loads it."""
     try:
-        path = os.path.join(os.path.dirname(__file__), CONTENT_FILE)
+        path = os.path.join(os.path.dirname(__file__), FAQ_FILE)
         if not os.path.exists(path):
             with open(path, "w", encoding='utf-8') as f:
-                json.dump(DEFAULT_CONTENT, f, indent=4)
+                json.dump(DEFAULT_FAQ, f, indent=4)
         with open(path, "r", encoding='utf-8') as f:
-            data = json.load(f)
-            return data
+            return json.dumps(json.load(f)) # Return as string for the Prompt
     except Exception as e:
-        logger.error(f"Error loading content: {e}")
-        return []
+        print(f"⚠️ Error loading FAQ: {e}")
+        return ""
 
-COURSE_CONTENT = load_content()
+STORE_FAQ_TEXT = load_knowledge_base()
 
 # ======================================================
-# 🧠 STATE MANAGEMENT (With Richer Mastery)
+# 💾 2. LEAD DATA STRUCTURE (Eyewear Specific)
 # ======================================================
 
 @dataclass
-class TopicMastery:
-    times_explained: int = 0
-    times_quizzed: int = 0
-    times_taught_back: int = 0
-    last_score: int = 0
-    avg_score: float = 0.0
-    _score_history: List[int] = field(default_factory=list)
-
-    def add_score(self, score: int):
-        self.last_score = score
-        self.times_taught_back += 1
-        self._score_history.append(score)
-        self.avg_score = sum(self._score_history) / len(self._score_history)
-
-@dataclass
-class TutorState:
-    """🧠 Tracks the current learning context and mastery scores"""
-    current_topic_id: str | None = None
-    current_topic_data: dict | None = None
-    mode: Literal["learn", "quiz", "teach_back"] = "learn"
-    mastery: Dict[str, TopicMastery] = field(default_factory=dict)
+class LeadProfile:
+    name: str | None = None
+    contact_info: str | None = None # Email or Phone
+    product_interest: str | None = None # e.g., Glasses, Sunglasses, Home Checkup
+    prescription_status: str | None = None # e.g., Have it, Need checkup, 0 power
+    location: str | None = None # City/Area
+    timeline: str | None = None # When they want to buy
     
-    def set_topic(self, topic_id: str):
-        topic = next((item for item in COURSE_CONTENT if item["id"] == topic_id), None)
-        if topic:
-            self.current_topic_id = topic_id
-            self.current_topic_data = topic
-            # Initialize mastery entry if not exists
-            if topic_id not in self.mastery:
-                self.mastery[topic_id] = TopicMastery()
-            return True
-        return False
-        
-    def get_mastery(self, topic_id: str) -> TopicMastery:
-        if topic_id not in self.mastery:
-            self.mastery[topic_id] = TopicMastery()
-        return self.mastery[topic_id]
+    def is_qualified(self):
+        """Returns True if we have minimum contact info"""
+        return all([self.name, self.contact_info, self.product_interest])
 
 @dataclass
 class Userdata:
-    tutor_state: TutorState
-    agent_session: Optional[AgentSession] = None 
+    lead_profile: LeadProfile
 
 # ======================================================
-# 🛠️ TUTOR TOOLS
+# 🛠️ 3. SDR TOOLS
 # ======================================================
 
 @function_tool
-async def select_topic(
-    ctx: RunContext[Userdata], 
-    topic_id: Annotated[str, Field(description="The ID of the topic to study")]
-) -> str:
-    """📚 Selects a physics topic to study from the available list."""
-    state = ctx.userdata.tutor_state
-    success = state.set_topic(topic_id.lower())
-    
-    if success:
-        m = state.get_mastery(topic_id)
-        stats = f"(Mastery: {m.avg_score:.1f}% | Taught back: {m.times_taught_back} times)"
-        return f"Topic set to {state.current_topic_data['title']} {stats}. Ask the user if they want to 'Learn', be 'Quizzed', or 'Teach it back'."
-    else:
-        available = ", ".join([t["id"] for t in COURSE_CONTENT])
-        return f"Topic not found. Available topics are: {available}"
-
-@function_tool
-async def set_learning_mode(
-    ctx: RunContext[Userdata], 
-    mode: Annotated[str, Field(description="The mode to switch to: 'learn', 'quiz', or 'teach_back'")]
-) -> str:
-    """🔄 Switches the interaction mode, updates voice, and increments usage counters."""
-    state = ctx.userdata.tutor_state
-    
-    if not state.current_topic_id:
-        return "Please select a topic first using select_topic."
-
-    state.mode = mode.lower()
-    mastery = state.get_mastery(state.current_topic_id)
-    
-    agent_session = ctx.userdata.agent_session 
-    
-    if agent_session:
-        if state.mode == "learn":
-            mastery.times_explained += 1
-            agent_session.tts.update_options(voice="en-US-matthew", style="Promo")
-            instruction = f"Mode: LEARN. Explain this: {state.current_topic_data['summary']}"
-            
-        elif state.mode == "quiz":
-            mastery.times_quizzed += 1
-            agent_session.tts.update_options(voice="en-US-alicia", style="Conversational")
-            instruction = f"Mode: QUIZ. Ask this: {state.current_topic_data['sample_question']}"
-            
-        elif state.mode == "teach_back":
-            # Don't increment count yet, wait for evaluation
-            agent_session.tts.update_options(voice="en-US-ken", style="Promo")
-            instruction = "Mode: TEACH_BACK. Ask the user to explain the concept to you."
-        else:
-            return "Invalid mode."
-    else:
-        instruction = "Voice switch failed."
-
-    print(f"🔄 MODE -> {state.mode.upper()} | Stats for {state.current_topic_id}: {mastery}")
-    return f"Switched to {state.mode} mode. {instruction}"
-
-@function_tool
-async def evaluate_teaching(
+async def update_lead_profile(
     ctx: RunContext[Userdata],
-    user_explanation: Annotated[str, Field(description="The explanation given by the user")],
-    score: Annotated[int, Field(description="A score between 0-100 based on accuracy and clarity")]
+    name: Annotated[Optional[str], Field(description="Customer's name")] = None,
+    contact_info: Annotated[Optional[str], Field(description="Customer's phone number or email")] = None,
+    product_interest: Annotated[Optional[str], Field(description="What they want to buy (Glasses, Sunglasses, Contacts, Eye Test)")] = None,
+    prescription_status: Annotated[Optional[str], Field(description="Do they have a prescription or need a checkup?")] = None,
+    location: Annotated[Optional[str], Field(description="Customer's city or area (important for home checkup)")] = None,
+    timeline: Annotated[Optional[str], Field(description="When they plan to purchase")] = None,
 ) -> str:
-    """📝 Records the teach-back score and returns feedback instructions."""
-    state = ctx.userdata.tutor_state
+    """
+    ✍️ Captures lead details provided by the user during conversation.
+    Only call this when the user explicitly provides information.
+    """
+    profile = ctx.userdata.lead_profile
     
-    if not state.current_topic_id:
-        return "No topic selected."
-
-    # Update Mastery
-    mastery = state.get_mastery(state.current_topic_id)
-    mastery.add_score(score)
+    # Update only fields that are provided (not None)
+    if name: profile.name = name
+    if contact_info: profile.contact_info = contact_info
+    if product_interest: profile.product_interest = product_interest
+    if prescription_status: profile.prescription_status = prescription_status
+    if location: profile.location = location
+    if timeline: profile.timeline = timeline
     
-    print(f"📝 EVALUATION: Score {score}/100 | Avg {mastery.avg_score:.1f} | Explanation: {user_explanation[:50]}...")
+    print(f"📝 UPDATING LEAD: {profile}")
+    return "Lead profile updated. Continue the conversation."
+
+@function_tool
+async def submit_lead_and_end(
+    ctx: RunContext[Userdata],
+    email_subject: Annotated[str, Field(description="Subject line for the follow-up email based on conversation context")],
+    email_body: Annotated[str, Field(description="The body of the follow-up email (2-3 paragraphs with CTA)")]
+) -> str:
+    """
+    💾 Saves the lead AND the email draft to the database, then signals end of call.
+    Call this when the user says goodbye. 
+    You MUST generate the email_subject and email_body based on the call context before calling this.
+    """
+    profile = ctx.userdata.lead_profile
     
-    return (
-        f"User Score: {score}/100. Running Average: {mastery.avg_score:.1f}. "
-        f"Give specific feedback on their explanation. "
-        f"If score < 70, correct their mistakes gently. If > 90, praise their mastery."
-    )
+    # 1. Save Lead Profile
+    lead_db_path = os.path.join(os.path.dirname(__file__), LEADS_FILE)
+    lead_entry = asdict(profile)
+    lead_entry["timestamp"] = datetime.now().isoformat()
+    
+    existing_leads = []
+    if os.path.exists(lead_db_path):
+        try:
+            with open(lead_db_path, "r") as f:
+                existing_leads = json.load(f)
+        except: pass
+    
+    existing_leads.append(lead_entry)
+    with open(lead_db_path, "w") as f:
+        json.dump(existing_leads, f, indent=4)
 
-# ======================================================
-# 🧠 AGENT DEFINITION
-# ======================================================
-
-class TutorAgent(Agent):
-    def __init__(self):
-        topic_list = ", ".join([f"{t['id']} ({t['title']})" for t in COURSE_CONTENT])
+    # 2. Save Email Draft
+    email_db_path = os.path.join(os.path.dirname(__file__), EMAILS_FILE)
+    email_entry = {
+        "lead_name": profile.name,
+        "lead_contact": profile.contact_info,
+        "subject": email_subject,
+        "body": email_body,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    existing_emails = []
+    if os.path.exists(email_db_path):
+        try:
+            with open(email_db_path, "r") as f:
+                existing_emails = json.load(f)
+        except: pass
         
+    existing_emails.append(email_entry)
+    with open(email_db_path, "w") as f:
+        json.dump(existing_emails, f, indent=4)
+        
+    print(f"✅ LEAD SAVED TO {LEADS_FILE}")
+    print(f"✅ EMAIL DRAFT SAVED TO {EMAILS_FILE}")
+    
+    # Return instructions to the agent to read out the summary
+    return (f"Lead and Email Draft Saved.\n\n"
+            f"Subject: {email_subject}\n"
+            f"Body Summary: {email_body[:50]}...\n\n"
+            f"Tell the user: 'Thanks {profile.name}. I've drafted a follow-up email with details about {profile.product_interest} for you. We'll speak soon!'")
+
+# ======================================================
+# 🧠 4. AGENT DEFINITION
+# ======================================================
+
+class SDRAgent(Agent):
+    def __init__(self):
         super().__init__(
             instructions=f"""
-            You are a Physics Tutor helping users master concepts like Newton's Laws.
+            You are 'Riya', a friendly and energetic Sales Development Rep (SDR) for **Lenskart**, India's leading eyewear brand.
             
-            📚 **AVAILABLE TOPICS:** {topic_list}
+            📘 **YOUR KNOWLEDGE BASE (FAQ):**
+            {STORE_FAQ_TEXT}
             
-            🔄 **MODES:**
-            1. **LEARN (Matthew):** Explain the concept.
-            2. **QUIZ (Alicia):** Ask a question.
-            3. **TEACH_BACK (Ken):** Listen to the user's explanation.
+            🎯 **YOUR GOAL:**
+            1. Answer questions about Lenskart's eyewear and services.
+            2. **QUALIFY THE LEAD:** Ask for Name, Product Interest, Location, and Contact Info.
+            3. **DRAFT FOLLOW-UP:** When the call ends, generate a personalized email draft based on what we discussed.
             
-            ⚙️ **RULES:**
-            - **Always** select a topic first.
-            - **Always** use `set_learning_mode` to switch tasks.
-            - **In Teach-Back Mode:** Listen to the user, **decide on a score (0-100)** based on their accuracy, and call `evaluate_teaching` with that score.
+            ⚙️ **BEHAVIOR:**
+            - **Be Helpful & Local:** Use a warm, Indian-English professional tone.
+            - **Capture Data:** Use `update_lead_profile` immediately when you hear new info.
+            
+            🔚 **CLOSING PROCEDURE (CRITICAL):**
+            When the user says "Goodbye", "That's all", or indicates they are done:
+            1. **Mentally draft** a follow-up email.
+               - **Subject:** Engaging and relevant (e.g., "Your Lenskart Home Checkup Details").
+               - **Body:** 2-3 paragraphs summarizing their interest (e.g., specific frames, eye test) and a Call-To-Action (e.g., "Reply to schedule").
+            2. Call `submit_lead_and_end` and pass this `email_subject` and `email_body` into it.
+            
+            🚫 **RESTRICTIONS:**
+            - Do NOT make up fake delivery dates.
+            - Ensure the email body is professional and polite.
             """,
-            tools=[select_topic, set_learning_mode, evaluate_teaching],
+            tools=[update_lead_profile, submit_lead_and_end],
         )
 
 # ======================================================
@@ -242,26 +231,33 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    print("\n" + "⚛️" * 25)
-    print("🚀 STARTING PHYSICS TUTOR SESSION (WITH MASTERY TRACKING)")
+    print("\n" + "👓" * 25)
+    print("🚀 STARTING LENSKART SDR SESSION")
     
-    userdata = Userdata(tutor_state=TutorState())
+    # 1. Initialize State
+    userdata = Userdata(lead_profile=LeadProfile())
 
+    # 2. Setup Agent
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
-        tts=murf.TTS(voice="en-US-matthew", style="Promo", text_pacing=True),
+        tts=murf.TTS(
+            voice="en-US-natalie", # Warm professional voice
+            style="Promo",        
+            text_pacing=True,
+        ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         userdata=userdata,
     )
     
-    userdata.agent_session = session
-    
+    # 3. Start
     await session.start(
-        agent=TutorAgent(),
+        agent=SDRAgent(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC()
+        ),
     )
 
     await ctx.connect()

@@ -1,0 +1,20 @@
+[
+    {
+        "name": "Jacob",
+        "contact_info": "jacob.lnv@gmail.com",
+        "product_interest": "Computer Glasses",
+        "prescription_status": "Zero power",
+        "location": "Bengaluru",
+        "timeline": null,
+        "timestamp": "2025-11-26T14:07:28.412556"
+    },
+    {
+        "name": "Alex",
+        "contact_info": "alex123@gmail.com",
+        "product_interest": "Computer Glasses (Vincent Chase) & Gold Membership",
+        "prescription_status": "No prescription needed, new glasses",
+        "location": "Mumbai",
+        "timeline": null,
+        "timestamp": "2025-11-26T15:00:32.844226"
+    }
+]
