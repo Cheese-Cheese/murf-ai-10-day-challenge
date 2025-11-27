@@ -1,10 +1,10 @@
 import logging
-import json
 import os
-import asyncio
+import sqlite3
 from datetime import datetime
-from typing import Annotated, Literal, Optional, List
-from dataclasses import dataclass, asdict
+from typing import Annotated, Optional
+from dataclasses import dataclass
+
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -20,7 +20,6 @@ from livekit.agents import (
     RunContext,
 )
 
-# 🔌 PLUGINS
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -28,197 +27,221 @@ logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 # ======================================================
-# 📂 1. KNOWLEDGE BASE (FAQ) - LENSKART THEMED
+# 💾 1. DATABASE SETUP (SQLite)
 # ======================================================
 
-FAQ_FILE = "lenskart_faq.json"
-LEADS_FILE = "lenskart_leads.json"
-EMAILS_FILE = "email_drafts.json"
-
-# Default FAQ data for "Lenskart"
-DEFAULT_FAQ = [
-    {
-        "question": "What products do you sell?",
-        "answer": "We offer a wide range of eyewear including premium eyeglasses, computer glasses (Blu-cut), polarized sunglasses, and contact lenses. We feature brands like Vincent Chase, John Jacobs, and Lenskart Air."
-    },
-    {
-        "question": "Do you offer home eye check-ups?",
-        "answer": "Yes! We offer a 'Home Eye Check-up' service. A certified optometrist will visit your home with specialized equipment and 100 best-selling frames for you to try. It costs just ₹99."
-    },
-    {
-        "question": "What is the Gold Membership?",
-        "answer": "Lenskart Gold Membership gives you access to our exclusive 'Buy 1 Get 1 Free' offer on all eyeglasses and sunglasses. It applies to the entire family and is valid for a year."
-    },
-    {
-        "question": "What is your return policy?",
-        "answer": "We have a '14-Day No Questions Asked' return policy. If you don't like the fit or style, you can return or exchange them easily."
-    },
-    {
-        "question": "How much do glasses cost?",
-        "answer": "Our eyeglasses start from as low as ₹1199 including lenses. The final price depends on the frame brand and the lens package you choose (e.g., Anti-glare, Blu-cut, Progressive)."
-    }
-]
-
-def load_knowledge_base():
-    """Generates FAQ file if missing, then loads it."""
-    try:
-        path = os.path.join(os.path.dirname(__file__), FAQ_FILE)
-        if not os.path.exists(path):
-            with open(path, "w", encoding='utf-8') as f:
-                json.dump(DEFAULT_FAQ, f, indent=4)
-        with open(path, "r", encoding='utf-8') as f:
-            return json.dumps(json.load(f)) # Return as string for the Prompt
-    except Exception as e:
-        print(f"⚠️ Error loading FAQ: {e}")
-        return ""
-
-STORE_FAQ_TEXT = load_knowledge_base()
-
-# ======================================================
-# 💾 2. LEAD DATA STRUCTURE (Eyewear Specific)
-# ======================================================
+DB_FILE = "fraud_db.sqlite"
 
 @dataclass
-class LeadProfile:
-    name: str | None = None
-    contact_info: str | None = None # Email or Phone
-    product_interest: str | None = None # e.g., Glasses, Sunglasses, Home Checkup
-    prescription_status: str | None = None # e.g., Have it, Need checkup, 0 power
-    location: str | None = None # City/Area
-    timeline: str | None = None # When they want to buy
-    
-    def is_qualified(self):
-        """Returns True if we have minimum contact info"""
-        return all([self.name, self.contact_info, self.product_interest])
+class FraudCase:
+    userName: str
+    securityIdentifier: str
+    cardEnding: str
+    transactionName: str
+    transactionAmount: str
+    transactionTime: str
+    transactionSource: str
+    case_status: str = "pending_review"
+    notes: str = ""
+
+
+def get_db_path():
+    return os.path.join(os.path.dirname(__file__), DB_FILE)
+
+
+def get_conn():
+    path = get_db_path()
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def seed_database():
+    """Create SQLite DB and insert sample rows if empty."""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fraud_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            userName TEXT NOT NULL,
+            securityIdentifier TEXT,
+            cardEnding TEXT,
+            transactionName TEXT,
+            transactionAmount TEXT,
+            transactionTime TEXT,
+            transactionSource TEXT,
+            case_status TEXT DEFAULT 'pending_review',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+    cur.execute("SELECT COUNT(1) FROM fraud_cases")
+    if cur.fetchone()[0] == 0:
+        sample_data = [
+            (
+                "Bob", "12345", "4242",
+                "Futura Industry", "Rs. 45000.00", "2:30 PM IST", "alibaba.com",
+                "pending_review", "Automated flag: High value transaction."
+            ),
+            (
+                "Sarah", "99887", "1199",
+                "Unknown Crypto Exchange", "Rs. 2,100.00", "4:15 AM IST", "online_transfer",
+                "pending_review", "Automated flag: Unusual location."
+            )
+        ]
+        cur.executemany(
+            """
+            INSERT INTO fraud_cases (
+                userName, securityIdentifier, cardEnding, transactionName,
+                transactionAmount, transactionTime, transactionSource, case_status, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            sample_data,
+        )
+        conn.commit()
+        print(f"✅ SQLite DB seeded at {DB_FILE}")
+
+    conn.close()
+
+
+# Initialize DB on load
+seed_database()
+
+# ======================================================
+# 🧠 2. STATE MANAGEMENT
+# ======================================================
 
 @dataclass
 class Userdata:
-    lead_profile: LeadProfile
+    active_case: Optional[FraudCase] = None
 
 # ======================================================
-# 🛠️ 3. SDR TOOLS
+# 🛠️ 3. FRAUD AGENT TOOLS (SQLite-backed)
 # ======================================================
 
 @function_tool
-async def update_lead_profile(
+async def lookup_customer(
     ctx: RunContext[Userdata],
-    name: Annotated[Optional[str], Field(description="Customer's name")] = None,
-    contact_info: Annotated[Optional[str], Field(description="Customer's phone number or email")] = None,
-    product_interest: Annotated[Optional[str], Field(description="What they want to buy (Glasses, Sunglasses, Contacts, Eye Test)")] = None,
-    prescription_status: Annotated[Optional[str], Field(description="Do they have a prescription or need a checkup?")] = None,
-    location: Annotated[Optional[str], Field(description="Customer's city or area (important for home checkup)")] = None,
-    timeline: Annotated[Optional[str], Field(description="When they plan to purchase")] = None,
+    name: Annotated[str, Field(description="The name the user provides")],
 ) -> str:
-    """
-    ✍️ Captures lead details provided by the user during conversation.
-    Only call this when the user explicitly provides information.
-    """
-    profile = ctx.userdata.lead_profile
-    
-    # Update only fields that are provided (not None)
-    if name: profile.name = name
-    if contact_info: profile.contact_info = contact_info
-    if product_interest: profile.product_interest = product_interest
-    if prescription_status: profile.prescription_status = prescription_status
-    if location: profile.location = location
-    if timeline: profile.timeline = timeline
-    
-    print(f"📝 UPDATING LEAD: {profile}")
-    return "Lead profile updated. Continue the conversation."
+    """Lookup a customer in SQLite DB."""
+    print(f"🔎 LOOKING UP: {name}")
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT * FROM fraud_cases WHERE LOWER(userName) = LOWER(?) LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            return "User not found in the fraud database. Please repeat the name."
+
+        record = dict(row)
+        ctx.userdata.active_case = FraudCase(
+            userName=record["userName"],
+            securityIdentifier=record["securityIdentifier"],
+            cardEnding=record["cardEnding"],
+            transactionName=record["transactionName"],
+            transactionAmount=record["transactionAmount"],
+            transactionTime=record["transactionTime"],
+            transactionSource=record["transactionSource"],
+            case_status=record["case_status"],
+            notes=record["notes"],
+        )
+
+        return (
+            f"Record Found.\n"
+            f"User: {record['userName']}\n"
+            f"Security ID (Expected): {record['securityIdentifier']}\n"
+            f"Transaction: {record['transactionAmount']} at {record['transactionName']} ({record['transactionSource']})\n"
+            f"Ask user for their Security Identifier now."
+        )
+
+    except Exception as e:
+        return f"Database error: {str(e)}"
+
 
 @function_tool
-async def submit_lead_and_end(
+async def resolve_fraud_case(
     ctx: RunContext[Userdata],
-    email_subject: Annotated[str, Field(description="Subject line for the follow-up email based on conversation context")],
-    email_body: Annotated[str, Field(description="The body of the follow-up email (2-3 paragraphs with CTA)")]
+    status: Annotated[str, Field(description="confirmed_safe or confirmed_fraud")],
+    notes: Annotated[str, Field(description="Notes on the user's confirmation")],
 ) -> str:
-    """
-    💾 Saves the lead AND the email draft to the database, then signals end of call.
-    Call this when the user says goodbye. 
-    You MUST generate the email_subject and email_body based on the call context before calling this.
-    """
-    profile = ctx.userdata.lead_profile
-    
-    # 1. Save Lead Profile
-    lead_db_path = os.path.join(os.path.dirname(__file__), LEADS_FILE)
-    lead_entry = asdict(profile)
-    lead_entry["timestamp"] = datetime.now().isoformat()
-    
-    existing_leads = []
-    if os.path.exists(lead_db_path):
-        try:
-            with open(lead_db_path, "r") as f:
-                existing_leads = json.load(f)
-        except: pass
-    
-    existing_leads.append(lead_entry)
-    with open(lead_db_path, "w") as f:
-        json.dump(existing_leads, f, indent=4)
 
-    # 2. Save Email Draft
-    email_db_path = os.path.join(os.path.dirname(__file__), EMAILS_FILE)
-    email_entry = {
-        "lead_name": profile.name,
-        "lead_contact": profile.contact_info,
-        "subject": email_subject,
-        "body": email_body,
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    existing_emails = []
-    if os.path.exists(email_db_path):
-        try:
-            with open(email_db_path, "r") as f:
-                existing_emails = json.load(f)
-        except: pass
-        
-    existing_emails.append(email_entry)
-    with open(email_db_path, "w") as f:
-        json.dump(existing_emails, f, indent=4)
-        
-    print(f"✅ LEAD SAVED TO {LEADS_FILE}")
-    print(f"✅ EMAIL DRAFT SAVED TO {EMAILS_FILE}")
-    
-    # Return instructions to the agent to read out the summary
-    return (f"Lead and Email Draft Saved.\n\n"
-            f"Subject: {email_subject}\n"
-            f"Body Summary: {email_body[:50]}...\n\n"
-            f"Tell the user: 'Thanks {profile.name}. I've drafted a follow-up email with details about {profile.product_interest} for you. We'll speak soon!'")
+    if not ctx.userdata.active_case:
+        return "Error: No active case selected."
+
+    case = ctx.userdata.active_case
+    case.case_status = status
+    case.notes = notes
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE fraud_cases
+            SET case_status = ?, notes = ?, updated_at = datetime('now')
+            WHERE userName = ?
+            """,
+            (case.case_status, case.notes, case.userName),
+        )
+        conn.commit()
+
+        # Confirm updated row
+        cur.execute("SELECT * FROM fraud_cases WHERE userName = ?", (case.userName,))
+        updated_row = dict(cur.fetchone())
+        conn.close()
+
+        print(f"✅ CASE UPDATED: {case.userName} -> {status}")
+
+        if status == "confirmed_fraud":
+            return (
+                f"Fraud confirmed. Card ending {case.cardEnding} is now BLOCKED. "
+                f"A replacement card will be issued.\n"
+                f"DB Updated At: {updated_row['updated_at']}"
+            )
+        else:
+            return (
+                f"Transaction marked SAFE. Restrictions lifted.\n"
+                f"DB Updated At: {updated_row['updated_at']}"
+            )
+
+    except Exception as e:
+        return f"Error saving to DB: {e}"
 
 # ======================================================
-# 🧠 4. AGENT DEFINITION
+# 🤖 4. AGENT DEFINITION
 # ======================================================
 
-class SDRAgent(Agent):
+class FraudAgent(Agent):
     def __init__(self):
         super().__init__(
-            instructions=f"""
-            You are 'Riya', a friendly and energetic Sales Development Rep (SDR) for **Lenskart**, India's leading eyewear brand.
-            
-            📘 **YOUR KNOWLEDGE BASE (FAQ):**
-            {STORE_FAQ_TEXT}
-            
-            🎯 **YOUR GOAL:**
-            1. Answer questions about Lenskart's eyewear and services.
-            2. **QUALIFY THE LEAD:** Ask for Name, Product Interest, Location, and Contact Info.
-            3. **DRAFT FOLLOW-UP:** When the call ends, generate a personalized email draft based on what we discussed.
-            
-            ⚙️ **BEHAVIOR:**
-            - **Be Helpful & Local:** Use a warm, Indian-English professional tone.
-            - **Capture Data:** Use `update_lead_profile` immediately when you hear new info.
-            
-            🔚 **CLOSING PROCEDURE (CRITICAL):**
-            When the user says "Goodbye", "That's all", or indicates they are done:
-            1. **Mentally draft** a follow-up email.
-               - **Subject:** Engaging and relevant (e.g., "Your Lenskart Home Checkup Details").
-               - **Body:** 2-3 paragraphs summarizing their interest (e.g., specific frames, eye test) and a Call-To-Action (e.g., "Reply to schedule").
-            2. Call `submit_lead_and_end` and pass this `email_subject` and `email_body` into it.
-            
-            🚫 **RESTRICTIONS:**
-            - Do NOT make up fake delivery dates.
-            - Ensure the email body is professional and polite.
+            instructions="""
+            You are 'Austin', a Fraud Detection Specialist at Central Bank.
+            Follow strict security protocol:
+
+            1. Greeting + ask for first name.
+            2. Immediately call lookup_customer(name).
+            3. Ask for Security Identifier.
+            4. If correct → continue. If incorrect → end call politely.
+            5. Explain suspicious transaction.
+            6. Ask: Did you make this transaction?
+               - YES → resolve_fraud_case('confirmed_safe')
+               - NO → resolve_fraud_case('confirmed_fraud')
+            7. Close professionally.
             """,
-            tools=[update_lead_profile, submit_lead_and_end],
+            tools=[lookup_customer, resolve_fraud_case],
         )
 
 # ======================================================
@@ -228,39 +251,36 @@ class SDRAgent(Agent):
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
+
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
-    print("\n" + "👓" * 25)
-    print("🚀 STARTING LENSKART SDR SESSION")
-    
-    # 1. Initialize State
-    userdata = Userdata(lead_profile=LeadProfile())
+    print("\n" + "💼" * 25)
+    print("🚀 STARTING FRAUD ALERT SESSION (SQLite)")
 
-    # 2. Setup Agent
+    userdata = Userdata()
+
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
-            voice="en-US-natalie", # Warm professional voice
-            style="Promo",        
+            voice="en-US-marcus",
+            style="Conversational",
             text_pacing=True,
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
         userdata=userdata,
     )
-    
-    # 3. Start
+
     await session.start(
-        agent=SDRAgent(),
+        agent=FraudAgent(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()
-        ),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
     await ctx.connect()
+
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
