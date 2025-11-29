@@ -30,15 +30,15 @@ const BOTTOM_VIEW_MOTION_PROPS = {
       translateY: '100%',
     },
   },
-  initial: 'hidden',
-  animate: 'visible',
-  exit: 'hidden',
+  initial: 'hidden' as const,
+  animate: 'visible' as const,
+  exit: 'hidden' as const,
   transition: {
     duration: 0.3,
     delay: 0.5,
-    ease: 'easeOut',
   },
 };
+
 
 interface FadeProps {
   top?: boolean;
@@ -93,19 +93,36 @@ export const SessionView = ({
   return (
     <section className="bg-background relative z-10 h-full w-full overflow-hidden" {...props}>
       {/* Chat Transcript */}
-      <div
-        className={cn(
-          'fixed inset-0 grid grid-cols-1 grid-rows-1',
-          !chatOpen && 'pointer-events-none'
-        )}
-      >
-        <Fade top className="absolute inset-x-4 top-0 h-40" />
-        <ScrollArea ref={scrollAreaRef} className="px-4 pt-40 pb-[150px] md:px-6 md:pb-[180px]">
-          <ChatTranscript
-            hidden={!chatOpen}
-            messages={messages}
-            className="mx-auto max-w-2xl space-y-3 transition-opacity duration-300 ease-out"
-          />
+      <div className="fixed inset-0 grid grid-cols-1 grid-rows-1 z-[20]">
+        <Fade top className="absolute inset-x-4 top-0 h-40 z-30" />
+        <ScrollArea ref={scrollAreaRef} className="px-4 pt-40 pb-[150px] md:px-6 md:pb-[180px] md:pl-96">
+          <div className="mx-auto max-w-3xl space-y-4">
+            {messages.map((msg, idx) => {
+              const isAgent = !msg.from?.isLocal;
+              return (
+                <motion.div
+                  key={msg.id || idx}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className={`flex ${isAgent ? 'justify-start' : 'justify-end'}`}
+                >
+                  <div
+                    className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                      isAgent
+                        ? 'bg-red-900/80 text-white border border-purple-500/30'
+                        : 'bg-blue-600/80 text-white border border-blue-400/30'
+                    } backdrop-blur-md shadow-lg`}
+                  >
+                    <div className="text-xs opacity-70 mb-1">
+                      {isAgent ? 'Game Master' : 'You'}
+                    </div>
+                    <div className="text-sm leading-relaxed">{msg.message}</div>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
         </ScrollArea>
       </div>
 
