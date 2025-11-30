@@ -1,0 +1,58 @@
+[
+  {
+    "id": "order-08eeedc6",
+    "items": [
+      {
+        "product_id": "hoodie-001",
+        "name": "Cozy Hoodie",
+        "unit_price": 1499,
+        "quantity": 1,
+        "line_total": 1499,
+        "attrs": {
+          "size": "L"
+        }
+      },
+      {
+        "product_id": "tee-002",
+        "name": "Casual Cotton Tee",
+        "unit_price": 299,
+        "quantity": 1,
+        "line_total": 299,
+        "attrs": {
+          "size": "L"
+        }
+      }
+    ],
+    "total": 1798,
+    "currency": "INR",
+    "created_at": "2025-11-30T12:55:13.660186Z"
+  },
+  {
+    "id": "order-20b3d557",
+    "items": [
+      {
+        "product_id": "hoodie-002",
+        "name": "Black Zip Hoodie",
+        "unit_price": 1299,
+        "quantity": 1,
+        "line_total": 1299,
+        "attrs": {
+          "size": "L"
+        }
+      },
+      {
+        "product_id": "tee-002",
+        "name": "Casual Cotton Tee",
+        "unit_price": 299,
+        "quantity": 1,
+        "line_total": 299,
+        "attrs": {
+          "size": "M"
+        }
+      }
+    ],
+    "total": 1598,
+    "currency": "INR",
+    "created_at": "2025-11-30T13:01:48.794236Z"
+  }
+]
